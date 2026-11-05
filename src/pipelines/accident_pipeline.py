@@ -1,56 +1,46 @@
+import logging
+
 import pandas as pd
-from src.services.data_preprocessing import DataPreprocessing
-from src.services.decision_tree_pipeline import DecisionTreePipeline
-from src.services.graphic_generator import GraphicGenerator
+
+from src import config
+from src.repositories.csv_accident_repository import CsvAccidentRepository
+from src.services.accident_classifier import AccidentClassifier
+from src.services.data_cleaner import AccidentDataCleaner
+from src.services.exploratory_analysis import ExploratoryAnalysis
+
+logger = logging.getLogger(__name__)
+
 
 class AccidentPipeline:
-    def __init__(self, dataframe: pd.DataFrame):
-        self.preprocessor = DataPreprocessing(
-            dataframe=dataframe,
-            target_col='classificacao_acidente',
-            numeric_cols=[
-                'km','pessoas','mortos','feridos_leves','feridos_graves',
-                'ilesos','ignorados','feridos','veiculos','latitude','longitude'
-            ],
-            categorical_cols=[c for c in dataframe.columns if c not in [
-                'id','data_inversa','classificacao_acidente',
-                'km','pessoas','mortos','feridos_leves','feridos_graves',
-                'ilesos','ignorados','feridos','veiculos','latitude','longitude'
-            ]]
-        )
-        
-        self.dataframe = self.preprocessor.dataframe
-        self.target = 'classificacao_acidente'
-        self.numeric_cols = self.preprocessor.numeric_cols
-        self.categorical_cols = self.preprocessor.categorical_cols
-        self.model = DecisionTreePipeline()
-        self.graphics = GraphicGenerator('src/data/graphics')
+    """Orquestra o fluxo: carga -> limpeza -> EDA -> treino -> avaliação."""
 
-    def run(self):
-        X, y = self.preprocessor.fit_transform()
-        self.model.train(X, y)
-        self.model.evaluate()
-        self.model.cross_validate(X, y)
-
-    def show_eda(
+    def __init__(
         self,
-        dist_cols: list[str] = None,
-        do_heatmap: bool = True,
-        cat_cols: list[str] = None
-    ):
-        print('Mostrando gráficos...')
-        print(self.dataframe.describe(include='all'))
-        if dist_cols is None:
-                dist_cols = ['km', 'pessoas', 'veiculos']
-        for col in dist_cols:
-            if col in self.preprocessor.numeric_cols:
-                self.graphics.plot_distribution(self.dataframe, col)
+        repository: CsvAccidentRepository,
+        cleaner: AccidentDataCleaner,
+        exploration: ExploratoryAnalysis,
+        classifier: AccidentClassifier,
+    ) -> None:
+        self._repository = repository
+        self._cleaner = cleaner
+        self._exploration = exploration
+        self._classifier = classifier
 
-        if do_heatmap:
-            self.graphics.correlation_heatmap(self.dataframe)
+    def run(self, explore: bool = True, cross_validate: bool = True) -> None:
+        accidents = self._cleaner.clean(self._repository.load())
+        logger.info("Registros após a limpeza: %d", len(accidents))
+        if explore:
+            self._exploration.run(accidents)
+        self._evaluate_holdout(accidents)
+        if cross_validate:
+            self._evaluate_cross_validation(accidents)
 
-        if cat_cols is None:
-            cat_cols = ['tipo_acidente', 'fase_dia', 'condicao_metereologica', 'tipo_pista']
-        for cat in cat_cols:
-            if cat in self.dataframe.columns:
-                self.graphics.bar_plot(self.dataframe, cat)
+    def _evaluate_holdout(self, accidents: pd.DataFrame) -> None:
+        result = self._classifier.fit_and_evaluate(accidents)
+        logger.info("Acurácia (hold-out): %.4f", result.accuracy)
+        logger.info("Classification report:\n%s", result.report)
+        logger.info("Matriz de confusão:\n%s", result.confusion)
+
+    def _evaluate_cross_validation(self, accidents: pd.DataFrame) -> None:
+        scores = self._classifier.cross_validate(accidents, config.CROSS_VALIDATION_FOLDS)
+        logger.info("Validação cruzada: %.4f ± %.4f", scores.mean(), scores.std())
